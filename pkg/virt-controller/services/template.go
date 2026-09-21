@@ -1714,7 +1714,13 @@ func podLabels(vmi *v1.VirtualMachineInstance, hostName string) map[string]strin
 	labels[v1.CreatedByLabel] = string(vmi.UID)
 	labels[v1.DeprecatedVirtualMachineNameLabel] = hostName
 	labels[v1.VirtualMachineInstanceIDLabel] = apimachinery.CalculateVirtualMachineInstanceID(vmi.Name)
-	if val, exists := vmi.Annotations[istio.InjectSidecarAnnotation]; exists {
+	if istio.AmbientMeshEnabled(vmi) {
+		// The ambient dataplane-mode label rides onto the pod with the other
+		// VMI labels and enrolls it through istio-cni. Istio's injector reads
+		// the pod label first, so pin injection off: a sidecar would make
+		// istio-cni skip the pod and defeat the ambient masquerade layout.
+		labels[istio.InjectSidecarLabel] = "false"
+	} else if val, exists := vmi.Annotations[istio.InjectSidecarAnnotation]; exists {
 		labels[istio.InjectSidecarLabel] = val
 	}
 	return labels

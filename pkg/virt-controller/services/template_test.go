@@ -1104,6 +1104,37 @@ var _ = Describe("Template", func() {
 				Expect(pod.Annotations).To(HaveKeyWithValue(istio.InjectSidecarAnnotation, "true"))
 			})
 		})
+		Context("With Istio istio.io/dataplane-mode=ambient label", func() {
+			render := func(annotations map[string]string) *k8sv1.Pod {
+				config, kvStore, svc = configFactory(defaultArch)
+				vmi := v1.VirtualMachineInstance{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "testvmi",
+						Namespace: "default",
+						UID:       "1234",
+						Labels: map[string]string{
+							istio.DataplaneModeLabel: istio.DataplaneModeAmbient,
+						},
+						Annotations: annotations,
+					},
+				}
+				pod, err := svc.RenderLaunchManifest(&vmi)
+				Expect(err).ToNot(HaveOccurred())
+				return pod
+			}
+			It("should propagate the label, pin sidecar injection off and not mount the serviceAccountToken", func() {
+				pod := render(nil)
+				Expect(pod.Labels).To(HaveKeyWithValue(istio.DataplaneModeLabel, istio.DataplaneModeAmbient))
+				Expect(pod.Labels).To(HaveKeyWithValue(istio.InjectSidecarLabel, "false"))
+				Expect(*pod.Spec.AutomountServiceAccountToken).To(BeFalse())
+			})
+			It("should prefer ambient over the sidecar.istio.io/inject annotation", func() {
+				pod := render(map[string]string{istio.InjectSidecarAnnotation: "true"})
+				Expect(pod.Labels).To(HaveKeyWithValue(istio.DataplaneModeLabel, istio.DataplaneModeAmbient))
+				Expect(pod.Labels).To(HaveKeyWithValue(istio.InjectSidecarLabel, "false"))
+				Expect(*pod.Spec.AutomountServiceAccountToken).To(BeFalse())
+			})
+		})
 		Context("with node selectors", func() {
 			DescribeTable("should add node selectors to template", func(arch string, ovmfPath string) {
 				config, kvStore, svc = configFactory(arch)
