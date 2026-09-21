@@ -19,6 +19,8 @@
 
 package istio
 
+import "fmt"
+
 const (
 	EnvoyAdminPort                     = 15000
 	EnvoyOutboundPort                  = 15001
@@ -52,4 +54,39 @@ func NonProxiedPorts() []int {
 	return []int{
 		SSHPort,
 	}
+}
+
+// AmbientCarveOutPorts are the ports that must NOT be NAT'd into the VM guest
+// when the launcher pod is enrolled in Istio's ambient mesh, so that
+// istio-cni's inbound redirect can hand the SYN to the local ztunnel.
+//
+// 15008 is the HBONE port that source-side ztunnels target for inbound mTLS
+// traffic into mesh workloads. If KubeVirt's masquerade NATs it into the VM,
+// the VM's TCP stack RSTs (no listener) and HBONE always fails.
+func AmbientCarveOutPorts() []uint {
+	return []uint{
+		EnvoyTunnelPort,
+	}
+}
+
+// Istio ambient in-pod packet marks (istio cni/pkg/iptables/iptables.go and
+// ztunnel's PACKET_MARK). ztunnel sets ZtunnelPacketMark on every socket it
+// opens inside the pod netns; istio-cni installs
+// "ip rule fwmark InpodTProxyMark/InpodMarkMask lookup 100" with a local
+// route so marked packets are delivered to ztunnel's transparent sockets.
+const (
+	ZtunnelPacketMark = 0x539
+	InpodTProxyMark   = 0x111
+	InpodMarkMask     = 0xfff
+)
+
+// MarkSpec renders a mark for an nft rule.
+func MarkSpec(mark int) string {
+	return fmt.Sprintf("0x%x", mark)
+}
+
+// MarkMatchSpec renders the masked comparison "& 0xfff == 0x..." for an nft
+// "meta mark" / "ct mark" expression, as separate rule tokens.
+func MarkMatchSpec(mark int) []string {
+	return []string{"&", MarkSpec(InpodMarkMask), "==", MarkSpec(mark)}
 }

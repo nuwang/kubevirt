@@ -38,4 +38,20 @@ const (
 	// https://istio.io/latest/docs/reference/config/annotations/#IoIstioRerouteVirtualInterfaces
 	// Introduced in Istio v1.25
 	RerouteVirtualInterfacesAnnotation = "istio.io/reroute-virtual-interfaces"
+
+	// DataplaneModeLabel is Istio's ambient enrollment label
+	// (https://istio.io/latest/docs/reference/config/labels/#IoIstioDataplaneMode).
+	// istio-cni enrolls a pod carrying DataplaneModeLabel=DataplaneModeAmbient
+	// in the ambient mesh. KubeVirt copies VMI labels onto the virt-launcher
+	// pod, so the same label on the VMI both enrolls the launcher pod and
+	// selects the ambient-aware masquerade NAT layout (see AmbientMeshEnabled):
+	// the catch-all DNAT to the guest is kept, the HBONE port is left to the
+	// node's ztunnel, and ztunnel's connections into the guest get a return
+	// path. This mirrors how InjectSidecarAnnotation selects the sidecar layout.
+	//
+	// Ambient and sidecar modes are mutually exclusive: ambient has no in-pod
+	// proxy. When both are requested, ambient wins and the launcher pod is
+	// explicitly labelled sidecar.istio.io/inject=false.
+	DataplaneModeLabel   = "istio.io/dataplane-mode"
+	DataplaneModeAmbient = "ambient"
 )

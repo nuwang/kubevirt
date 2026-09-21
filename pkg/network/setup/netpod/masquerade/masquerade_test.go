@@ -1217,6 +1217,473 @@ family ip6 table nat chain output rulespec [ip6 daddr { ::1 } tcp dport 14000-16
 			Expect(nftStub.String()).To(Equal(expectedConfig), fmt.Sprintf("actual:\n%s\n\nexpected:\n%s", nftStub.String(), expectedConfig))
 		})
 	})
+
+	Context("with Istio ambient mesh", func() {
+		// The launcher pod is enrolled in Istio's ambient mesh: the node's
+		// ztunnel listens on :15008 (HBONE) / :15006 / :15001 inside the pod
+		// netns, istio-cni REDIRECTs plaintext inbound to :15006 and dials the
+		// workload at <pod-ip>:<port> with the client's source address. The
+		// masquerade layout keeps the catch-all DNAT for probes, leaves :15008
+		// alone, lets istio's nat chain run first (priority -99), DNATs
+		// ztunnel's dial into the guest, and marks the guest's replies (0x111)
+		// so istio's policy route delivers them back to ztunnel.
+		It("setup with IPv4, no ports", func() {
+			nftStub := &nftableStub{}
+			masqPod := masquerade.New(
+				masquerade.WithNftableAdapter(nftStub),
+				masquerade.WithAmbient(true),
+			)
+
+			err := masqPod.Setup(
+				&nmstate.Interface{
+					Name:       "k6t-eth0",
+					Index:      1,
+					TypeName:   nmstate.TypeBridge,
+					State:      nmstate.IfaceStateUp,
+					MacAddress: "bb:bb:bb:bb:bb:bb",
+					IPv4: nmstate.IP{
+						Enabled: new(true),
+						Address: []nmstate.IPAddress{{IP: "10.0.2.1", PrefixLen: 24}},
+					},
+					Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: "default"},
+				},
+				&nmstate.Interface{
+					Name:       "eth0",
+					Index:      0,
+					TypeName:   nmstate.TypeVETH,
+					State:      nmstate.IfaceStateUp,
+					MacAddress: "aa:aa:aa:aa:aa:aa",
+					MTU:        1500,
+					IPv4: nmstate.IP{
+						Enabled: new(true),
+						Address: []nmstate.IPAddress{{IP: "10.222.222.1", PrefixLen: 30}},
+					},
+					Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: "default"},
+				},
+				v1.Interface{
+					Name:                   "default",
+					InterfaceBindingMethod: v1.InterfaceBindingMethod{Masquerade: &v1.InterfaceMasquerade{}},
+				},
+			)
+			Expect(err).NotTo(HaveOccurred())
+			expectedConfig := `tables:
+family ip name nat
+chains:
+family ip table nat name prerouting chainspec [{ type nat hook prerouting priority -99; }]
+family ip table nat name input chainspec [{ type nat hook input priority 100; }]
+family ip table nat name output chainspec [{ type nat hook output priority -100; }]
+family ip table nat name postrouting chainspec [{ type nat hook postrouting priority 100; }]
+family ip table nat name KUBEVIRT_PREINBOUND chainspec []
+family ip table nat name KUBEVIRT_POSTINBOUND chainspec []
+family ip table nat name KUBEVIRT_AMBIENT_PREROUTING chainspec [{ type filter hook prerouting priority -150; }]
+family ip table nat name KUBEVIRT_AMBIENT_POSTROUTING chainspec [{ type filter hook postrouting priority -150; }]
+rules:
+family ip table nat chain postrouting rulespec [ip saddr 10.0.2.2 counter masquerade]
+family ip table nat chain prerouting rulespec [iifname eth0 counter jump KUBEVIRT_PREINBOUND]
+family ip table nat chain postrouting rulespec [oifname k6t-eth0 counter jump KUBEVIRT_POSTINBOUND]
+family ip table nat chain KUBEVIRT_AMBIENT_POSTROUTING rulespec [oifname k6t-eth0 ct direction original meta mark & 0xfff == 0x539 counter ct mark set 0x539]
+family ip table nat chain KUBEVIRT_AMBIENT_PREROUTING rulespec [iifname k6t-eth0 ct mark & 0xfff == 0x539 counter meta mark set 0x111]
+family ip table nat chain KUBEVIRT_PREINBOUND rulespec [tcp dport { 15008 } counter return]
+family ip table nat chain KUBEVIRT_PREINBOUND rulespec [counter dnat to 10.0.2.2]
+family ip table nat chain KUBEVIRT_POSTINBOUND rulespec [ip saddr { 127.0.0.1 } counter snat to 10.0.2.1]
+family ip table nat chain output rulespec [ip daddr { 127.0.0.1, 10.222.222.1 } counter dnat to 10.0.2.2]
+`
+			Expect(nftStub.String()).To(Equal(expectedConfig), fmt.Sprintf("actual:\n%s\n\nexpected:\n%s", nftStub.String(), expectedConfig))
+		})
+
+		It("setup with IPv4 and IPv6, no ports", func() {
+			nftStub := &nftableStub{}
+			masqPod := masquerade.New(
+				masquerade.WithNftableAdapter(nftStub),
+				masquerade.WithAmbient(true),
+			)
+
+			err := masqPod.Setup(
+				&nmstate.Interface{
+					Name:       "k6t-eth0",
+					Index:      1,
+					TypeName:   nmstate.TypeBridge,
+					State:      nmstate.IfaceStateUp,
+					MacAddress: "bb:bb:bb:bb:bb:bb",
+					IPv4: nmstate.IP{
+						Enabled: new(true),
+						Address: []nmstate.IPAddress{{IP: "10.0.2.1", PrefixLen: 24}},
+					},
+					IPv6: nmstate.IP{
+						Enabled: new(true),
+						Address: []nmstate.IPAddress{{IP: "fd10:0:2::1", PrefixLen: 120}},
+					},
+					Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: "default"},
+				},
+				&nmstate.Interface{
+					Name:       "eth0",
+					Index:      0,
+					TypeName:   nmstate.TypeVETH,
+					State:      nmstate.IfaceStateUp,
+					MacAddress: "aa:aa:aa:aa:aa:aa",
+					MTU:        1500,
+					IPv4: nmstate.IP{
+						Enabled: new(true),
+						Address: []nmstate.IPAddress{{IP: "10.222.222.1", PrefixLen: 30}},
+					},
+					IPv6: nmstate.IP{
+						Enabled: new(true),
+						Address: []nmstate.IPAddress{{IP: "2001::1", PrefixLen: 64}},
+					},
+					Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: "default"},
+				},
+				v1.Interface{
+					Name:                   "default",
+					InterfaceBindingMethod: v1.InterfaceBindingMethod{Masquerade: &v1.InterfaceMasquerade{}},
+				},
+			)
+			Expect(err).NotTo(HaveOccurred())
+			expectedConfig := `tables:
+family ip name nat
+family ip6 name nat
+chains:
+family ip table nat name prerouting chainspec [{ type nat hook prerouting priority -99; }]
+family ip table nat name input chainspec [{ type nat hook input priority 100; }]
+family ip table nat name output chainspec [{ type nat hook output priority -100; }]
+family ip table nat name postrouting chainspec [{ type nat hook postrouting priority 100; }]
+family ip table nat name KUBEVIRT_PREINBOUND chainspec []
+family ip table nat name KUBEVIRT_POSTINBOUND chainspec []
+family ip table nat name KUBEVIRT_AMBIENT_PREROUTING chainspec [{ type filter hook prerouting priority -150; }]
+family ip table nat name KUBEVIRT_AMBIENT_POSTROUTING chainspec [{ type filter hook postrouting priority -150; }]
+family ip6 table nat name prerouting chainspec [{ type nat hook prerouting priority -99; }]
+family ip6 table nat name input chainspec [{ type nat hook input priority 100; }]
+family ip6 table nat name output chainspec [{ type nat hook output priority -100; }]
+family ip6 table nat name postrouting chainspec [{ type nat hook postrouting priority 100; }]
+family ip6 table nat name KUBEVIRT_PREINBOUND chainspec []
+family ip6 table nat name KUBEVIRT_POSTINBOUND chainspec []
+family ip6 table nat name KUBEVIRT_AMBIENT_PREROUTING chainspec [{ type filter hook prerouting priority -150; }]
+family ip6 table nat name KUBEVIRT_AMBIENT_POSTROUTING chainspec [{ type filter hook postrouting priority -150; }]
+rules:
+family ip table nat chain postrouting rulespec [ip saddr 10.0.2.2 counter masquerade]
+family ip table nat chain prerouting rulespec [iifname eth0 counter jump KUBEVIRT_PREINBOUND]
+family ip table nat chain postrouting rulespec [oifname k6t-eth0 counter jump KUBEVIRT_POSTINBOUND]
+family ip table nat chain KUBEVIRT_AMBIENT_POSTROUTING rulespec [oifname k6t-eth0 ct direction original meta mark & 0xfff == 0x539 counter ct mark set 0x539]
+family ip table nat chain KUBEVIRT_AMBIENT_PREROUTING rulespec [iifname k6t-eth0 ct mark & 0xfff == 0x539 counter meta mark set 0x111]
+family ip table nat chain KUBEVIRT_PREINBOUND rulespec [tcp dport { 15008 } counter return]
+family ip table nat chain KUBEVIRT_PREINBOUND rulespec [counter dnat to 10.0.2.2]
+family ip table nat chain KUBEVIRT_POSTINBOUND rulespec [ip saddr { 127.0.0.1 } counter snat to 10.0.2.1]
+family ip table nat chain output rulespec [ip daddr { 127.0.0.1, 10.222.222.1 } counter dnat to 10.0.2.2]
+family ip6 table nat chain postrouting rulespec [ip6 saddr fd10:0:2::2 counter masquerade]
+family ip6 table nat chain prerouting rulespec [iifname eth0 counter jump KUBEVIRT_PREINBOUND]
+family ip6 table nat chain postrouting rulespec [oifname k6t-eth0 counter jump KUBEVIRT_POSTINBOUND]
+family ip6 table nat chain KUBEVIRT_AMBIENT_POSTROUTING rulespec [oifname k6t-eth0 ct direction original meta mark & 0xfff == 0x539 counter ct mark set 0x539]
+family ip6 table nat chain KUBEVIRT_AMBIENT_PREROUTING rulespec [iifname k6t-eth0 ct mark & 0xfff == 0x539 counter meta mark set 0x111]
+family ip6 table nat chain KUBEVIRT_PREINBOUND rulespec [tcp dport { 15008 } counter return]
+family ip6 table nat chain KUBEVIRT_PREINBOUND rulespec [counter dnat to fd10:0:2::2]
+family ip6 table nat chain KUBEVIRT_POSTINBOUND rulespec [ip6 saddr { ::1 } counter snat to fd10:0:2::1]
+family ip6 table nat chain output rulespec [ip6 daddr { ::1, 2001::1 } counter dnat to fd10:0:2::2]
+`
+			Expect(nftStub.String()).To(Equal(expectedConfig), fmt.Sprintf("actual:\n%s\n\nexpected:\n%s", nftStub.String(), expectedConfig))
+		})
+
+		It("uses the global unicast IPv6 pod address for the output DNAT when link-local is listed first", func() {
+			nftStub := &nftableStub{}
+			masqPod := masquerade.New(
+				masquerade.WithNftableAdapter(nftStub),
+				masquerade.WithAmbient(true),
+			)
+
+			err := masqPod.Setup(
+				&nmstate.Interface{
+					Name:       "k6t-eth0",
+					Index:      1,
+					TypeName:   nmstate.TypeBridge,
+					State:      nmstate.IfaceStateUp,
+					MacAddress: "bb:bb:bb:bb:bb:bb",
+					IPv4: nmstate.IP{
+						Enabled: new(true),
+						Address: []nmstate.IPAddress{{IP: "10.0.2.1", PrefixLen: 24}},
+					},
+					IPv6: nmstate.IP{
+						Enabled: new(true),
+						Address: []nmstate.IPAddress{{IP: "fd10:0:2::1", PrefixLen: 120}},
+					},
+					Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: "default"},
+				},
+				&nmstate.Interface{
+					Name:       "eth0",
+					Index:      0,
+					TypeName:   nmstate.TypeVETH,
+					State:      nmstate.IfaceStateUp,
+					MacAddress: "aa:aa:aa:aa:aa:aa",
+					MTU:        1500,
+					IPv4: nmstate.IP{
+						Enabled: new(true),
+						Address: []nmstate.IPAddress{{IP: "10.222.222.1", PrefixLen: 30}},
+					},
+					IPv6: nmstate.IP{
+						Enabled: new(true),
+						Address: []nmstate.IPAddress{{IP: "fe80::aaaa", PrefixLen: 64}, {IP: "2001::1", PrefixLen: 64}},
+					},
+					Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: "default"},
+				},
+				v1.Interface{
+					Name:                   "default",
+					InterfaceBindingMethod: v1.InterfaceBindingMethod{Masquerade: &v1.InterfaceMasquerade{}},
+				},
+			)
+			Expect(err).NotTo(HaveOccurred())
+			expectedConfig := `tables:
+family ip name nat
+family ip6 name nat
+chains:
+family ip table nat name prerouting chainspec [{ type nat hook prerouting priority -99; }]
+family ip table nat name input chainspec [{ type nat hook input priority 100; }]
+family ip table nat name output chainspec [{ type nat hook output priority -100; }]
+family ip table nat name postrouting chainspec [{ type nat hook postrouting priority 100; }]
+family ip table nat name KUBEVIRT_PREINBOUND chainspec []
+family ip table nat name KUBEVIRT_POSTINBOUND chainspec []
+family ip table nat name KUBEVIRT_AMBIENT_PREROUTING chainspec [{ type filter hook prerouting priority -150; }]
+family ip table nat name KUBEVIRT_AMBIENT_POSTROUTING chainspec [{ type filter hook postrouting priority -150; }]
+family ip6 table nat name prerouting chainspec [{ type nat hook prerouting priority -99; }]
+family ip6 table nat name input chainspec [{ type nat hook input priority 100; }]
+family ip6 table nat name output chainspec [{ type nat hook output priority -100; }]
+family ip6 table nat name postrouting chainspec [{ type nat hook postrouting priority 100; }]
+family ip6 table nat name KUBEVIRT_PREINBOUND chainspec []
+family ip6 table nat name KUBEVIRT_POSTINBOUND chainspec []
+family ip6 table nat name KUBEVIRT_AMBIENT_PREROUTING chainspec [{ type filter hook prerouting priority -150; }]
+family ip6 table nat name KUBEVIRT_AMBIENT_POSTROUTING chainspec [{ type filter hook postrouting priority -150; }]
+rules:
+family ip table nat chain postrouting rulespec [ip saddr 10.0.2.2 counter masquerade]
+family ip table nat chain prerouting rulespec [iifname eth0 counter jump KUBEVIRT_PREINBOUND]
+family ip table nat chain postrouting rulespec [oifname k6t-eth0 counter jump KUBEVIRT_POSTINBOUND]
+family ip table nat chain KUBEVIRT_AMBIENT_POSTROUTING rulespec [oifname k6t-eth0 ct direction original meta mark & 0xfff == 0x539 counter ct mark set 0x539]
+family ip table nat chain KUBEVIRT_AMBIENT_PREROUTING rulespec [iifname k6t-eth0 ct mark & 0xfff == 0x539 counter meta mark set 0x111]
+family ip table nat chain KUBEVIRT_PREINBOUND rulespec [tcp dport { 15008 } counter return]
+family ip table nat chain KUBEVIRT_PREINBOUND rulespec [counter dnat to 10.0.2.2]
+family ip table nat chain KUBEVIRT_POSTINBOUND rulespec [ip saddr { 127.0.0.1 } counter snat to 10.0.2.1]
+family ip table nat chain output rulespec [ip daddr { 127.0.0.1, 10.222.222.1 } counter dnat to 10.0.2.2]
+family ip6 table nat chain postrouting rulespec [ip6 saddr fd10:0:2::2 counter masquerade]
+family ip6 table nat chain prerouting rulespec [iifname eth0 counter jump KUBEVIRT_PREINBOUND]
+family ip6 table nat chain postrouting rulespec [oifname k6t-eth0 counter jump KUBEVIRT_POSTINBOUND]
+family ip6 table nat chain KUBEVIRT_AMBIENT_POSTROUTING rulespec [oifname k6t-eth0 ct direction original meta mark & 0xfff == 0x539 counter ct mark set 0x539]
+family ip6 table nat chain KUBEVIRT_AMBIENT_PREROUTING rulespec [iifname k6t-eth0 ct mark & 0xfff == 0x539 counter meta mark set 0x111]
+family ip6 table nat chain KUBEVIRT_PREINBOUND rulespec [tcp dport { 15008 } counter return]
+family ip6 table nat chain KUBEVIRT_PREINBOUND rulespec [counter dnat to fd10:0:2::2]
+family ip6 table nat chain KUBEVIRT_POSTINBOUND rulespec [ip6 saddr { ::1 } counter snat to fd10:0:2::1]
+family ip6 table nat chain output rulespec [ip6 daddr { ::1, 2001::1 } counter dnat to fd10:0:2::2]
+`
+			Expect(nftStub.String()).To(Equal(expectedConfig), fmt.Sprintf("actual:\n%s\n\nexpected:\n%s", nftStub.String(), expectedConfig))
+		})
+
+		It("setup with IPv4, including ports, skips the HBONE port", func() {
+			nftStub := &nftableStub{}
+			masqPod := masquerade.New(
+				masquerade.WithNftableAdapter(nftStub),
+				masquerade.WithAmbient(true),
+			)
+
+			err := masqPod.Setup(
+				&nmstate.Interface{
+					Name:       "k6t-eth0",
+					Index:      1,
+					TypeName:   nmstate.TypeBridge,
+					State:      nmstate.IfaceStateUp,
+					MacAddress: "bb:bb:bb:bb:bb:bb",
+					IPv4: nmstate.IP{
+						Enabled: new(true),
+						Address: []nmstate.IPAddress{{IP: "10.0.2.1", PrefixLen: 24}},
+					},
+					Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: "default"},
+				},
+				&nmstate.Interface{
+					Name:       "eth0",
+					Index:      0,
+					TypeName:   nmstate.TypeVETH,
+					State:      nmstate.IfaceStateUp,
+					MacAddress: "aa:aa:aa:aa:aa:aa",
+					MTU:        1500,
+					IPv4: nmstate.IP{
+						Enabled: new(true),
+						Address: []nmstate.IPAddress{{IP: "10.222.222.1", PrefixLen: 30}},
+					},
+					Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: "default"},
+				},
+				v1.Interface{
+					Name:                   "default",
+					InterfaceBindingMethod: v1.InterfaceBindingMethod{Masquerade: &v1.InterfaceMasquerade{}},
+					Ports: []v1.Port{
+						{Name: "http", Protocol: "tcp", Port: 8080},
+						// TCP :15008 is the HBONE port: it must not be forwarded
+						// into the guest, so that ztunnel's in-pod listener gets it.
+						{Name: "hbone", Protocol: "tcp", Port: 15008},
+						// A UDP port that merely shares the number is unrelated
+						// to HBONE and is forwarded like any other port.
+						{Name: "udp-15008", Protocol: "udp", Port: 15008},
+					},
+				},
+			)
+			Expect(err).NotTo(HaveOccurred())
+			expectedConfig := `tables:
+family ip name nat
+chains:
+family ip table nat name prerouting chainspec [{ type nat hook prerouting priority -99; }]
+family ip table nat name input chainspec [{ type nat hook input priority 100; }]
+family ip table nat name output chainspec [{ type nat hook output priority -100; }]
+family ip table nat name postrouting chainspec [{ type nat hook postrouting priority 100; }]
+family ip table nat name KUBEVIRT_PREINBOUND chainspec []
+family ip table nat name KUBEVIRT_POSTINBOUND chainspec []
+family ip table nat name KUBEVIRT_AMBIENT_PREROUTING chainspec [{ type filter hook prerouting priority -150; }]
+family ip table nat name KUBEVIRT_AMBIENT_POSTROUTING chainspec [{ type filter hook postrouting priority -150; }]
+rules:
+family ip table nat chain postrouting rulespec [ip saddr 10.0.2.2 counter masquerade]
+family ip table nat chain prerouting rulespec [iifname eth0 counter jump KUBEVIRT_PREINBOUND]
+family ip table nat chain postrouting rulespec [oifname k6t-eth0 counter jump KUBEVIRT_POSTINBOUND]
+family ip table nat chain KUBEVIRT_AMBIENT_POSTROUTING rulespec [oifname k6t-eth0 ct direction original meta mark & 0xfff == 0x539 counter ct mark set 0x539]
+family ip table nat chain KUBEVIRT_AMBIENT_PREROUTING rulespec [iifname k6t-eth0 ct mark & 0xfff == 0x539 counter meta mark set 0x111]
+family ip table nat chain KUBEVIRT_PREINBOUND rulespec [tcp dport { 15008 } counter return]
+family ip table nat chain KUBEVIRT_PREINBOUND rulespec [tcp dport { 8080 } counter dnat to 10.0.2.2]
+family ip table nat chain KUBEVIRT_POSTINBOUND rulespec [tcp dport 8080 ip saddr { 127.0.0.1 } counter snat to 10.0.2.1]
+family ip table nat chain output rulespec [ip daddr { 127.0.0.1, 10.222.222.1 } tcp dport 8080 counter dnat to 10.0.2.2]
+family ip table nat chain KUBEVIRT_PREINBOUND rulespec [udp dport { 15008 } counter dnat to 10.0.2.2]
+family ip table nat chain KUBEVIRT_POSTINBOUND rulespec [udp dport 15008 ip saddr { 127.0.0.1 } counter snat to 10.0.2.1]
+family ip table nat chain output rulespec [ip daddr { 127.0.0.1, 10.222.222.1 } udp dport 15008 counter dnat to 10.0.2.2]
+`
+			Expect(nftStub.String()).To(Equal(expectedConfig), fmt.Sprintf("actual:\n%s\n\nexpected:\n%s", nftStub.String(), expectedConfig))
+		})
+
+		It("forwards a port range as plain mode does, even when the sidecar annotation is also set", func() {
+			nftStub := &nftableStub{}
+			masqPod := masquerade.New(
+				masquerade.WithNftableAdapter(nftStub),
+				masquerade.WithIstio(true),
+				masquerade.WithAmbient(true),
+				masquerade.WithPortRangesSpecGateEnabled(true),
+			)
+
+			err := masqPod.Setup(
+				&nmstate.Interface{
+					Name:       "k6t-eth0",
+					Index:      1,
+					TypeName:   nmstate.TypeBridge,
+					State:      nmstate.IfaceStateUp,
+					MacAddress: "bb:bb:bb:bb:bb:bb",
+					IPv4: nmstate.IP{
+						Enabled: new(true),
+						Address: []nmstate.IPAddress{{IP: "10.0.2.1", PrefixLen: 24}},
+					},
+					Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: "default"},
+				},
+				&nmstate.Interface{
+					Name:       "eth0",
+					Index:      0,
+					TypeName:   nmstate.TypeVETH,
+					State:      nmstate.IfaceStateUp,
+					MacAddress: "aa:aa:aa:aa:aa:aa",
+					MTU:        1500,
+					IPv4: nmstate.IP{
+						Enabled: new(true),
+						Address: []nmstate.IPAddress{{IP: "10.222.222.1", PrefixLen: 30}},
+					},
+					Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: "default"},
+				},
+				v1.Interface{
+					Name:                   "default",
+					InterfaceBindingMethod: v1.InterfaceBindingMethod{Masquerade: &v1.InterfaceMasquerade{}},
+					// A range spanning the HBONE port: the carve-out return precedes
+					// the range DNAT in KUBEVIRT_PREINBOUND, so :15008 stays local.
+					PortRanges: []v1.PortRange{{Protocol: "tcp", Start: 15000, End: 15100}},
+				},
+			)
+			Expect(err).NotTo(HaveOccurred())
+			expectedConfig := `tables:
+family ip name nat
+chains:
+family ip table nat name prerouting chainspec [{ type nat hook prerouting priority -99; }]
+family ip table nat name input chainspec [{ type nat hook input priority 100; }]
+family ip table nat name output chainspec [{ type nat hook output priority -100; }]
+family ip table nat name postrouting chainspec [{ type nat hook postrouting priority 100; }]
+family ip table nat name KUBEVIRT_PREINBOUND chainspec []
+family ip table nat name KUBEVIRT_POSTINBOUND chainspec []
+family ip table nat name KUBEVIRT_AMBIENT_PREROUTING chainspec [{ type filter hook prerouting priority -150; }]
+family ip table nat name KUBEVIRT_AMBIENT_POSTROUTING chainspec [{ type filter hook postrouting priority -150; }]
+rules:
+family ip table nat chain postrouting rulespec [ip saddr 10.0.2.2 counter masquerade]
+family ip table nat chain prerouting rulespec [iifname eth0 counter jump KUBEVIRT_PREINBOUND]
+family ip table nat chain postrouting rulespec [oifname k6t-eth0 counter jump KUBEVIRT_POSTINBOUND]
+family ip table nat chain KUBEVIRT_AMBIENT_POSTROUTING rulespec [oifname k6t-eth0 ct direction original meta mark & 0xfff == 0x539 counter ct mark set 0x539]
+family ip table nat chain KUBEVIRT_AMBIENT_PREROUTING rulespec [iifname k6t-eth0 ct mark & 0xfff == 0x539 counter meta mark set 0x111]
+family ip table nat chain KUBEVIRT_PREINBOUND rulespec [tcp dport { 15008 } counter return]
+family ip table nat chain KUBEVIRT_PREINBOUND rulespec [tcp dport 15000-15100 counter dnat to 10.0.2.2]
+family ip table nat chain KUBEVIRT_POSTINBOUND rulespec [tcp dport 15000-15100 ip saddr { 127.0.0.1 } counter snat to 10.0.2.1]
+family ip table nat chain output rulespec [ip daddr { 127.0.0.1, 10.222.222.1 } tcp dport 15000-15100 counter dnat to 10.0.2.2]
+`
+			Expect(nftStub.String()).To(Equal(expectedConfig), fmt.Sprintf("actual:\n%s\n\nexpected:\n%s", nftStub.String(), expectedConfig))
+		})
+
+		It("takes precedence over the Istio sidecar layout when both are enabled", func() {
+			nftStub := &nftableStub{}
+			masqPod := masquerade.New(
+				masquerade.WithNftableAdapter(nftStub),
+				masquerade.WithIstio(true),
+				masquerade.WithAmbient(true),
+			)
+
+			err := masqPod.Setup(
+				&nmstate.Interface{
+					Name:       "k6t-eth0",
+					Index:      1,
+					TypeName:   nmstate.TypeBridge,
+					State:      nmstate.IfaceStateUp,
+					MacAddress: "bb:bb:bb:bb:bb:bb",
+					IPv4: nmstate.IP{
+						Enabled: new(true),
+						Address: []nmstate.IPAddress{{IP: "10.0.2.1", PrefixLen: 24}},
+					},
+					Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: "default"},
+				},
+				&nmstate.Interface{
+					Name:       "eth0",
+					Index:      0,
+					TypeName:   nmstate.TypeVETH,
+					State:      nmstate.IfaceStateUp,
+					MacAddress: "aa:aa:aa:aa:aa:aa",
+					MTU:        1500,
+					IPv4: nmstate.IP{
+						Enabled: new(true),
+						Address: []nmstate.IPAddress{{IP: "10.222.222.1", PrefixLen: 30}},
+					},
+					Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: "default"},
+				},
+				v1.Interface{
+					Name:                   "default",
+					InterfaceBindingMethod: v1.InterfaceBindingMethod{Masquerade: &v1.InterfaceMasquerade{}},
+				},
+			)
+			Expect(err).NotTo(HaveOccurred())
+
+			// The sidecar layout (no catch-all, :22 only, 127.0.0.6 SNAT source,
+			// reserved-port returns) must not appear at all.
+			expectedConfig := `tables:
+family ip name nat
+chains:
+family ip table nat name prerouting chainspec [{ type nat hook prerouting priority -99; }]
+family ip table nat name input chainspec [{ type nat hook input priority 100; }]
+family ip table nat name output chainspec [{ type nat hook output priority -100; }]
+family ip table nat name postrouting chainspec [{ type nat hook postrouting priority 100; }]
+family ip table nat name KUBEVIRT_PREINBOUND chainspec []
+family ip table nat name KUBEVIRT_POSTINBOUND chainspec []
+family ip table nat name KUBEVIRT_AMBIENT_PREROUTING chainspec [{ type filter hook prerouting priority -150; }]
+family ip table nat name KUBEVIRT_AMBIENT_POSTROUTING chainspec [{ type filter hook postrouting priority -150; }]
+rules:
+family ip table nat chain postrouting rulespec [ip saddr 10.0.2.2 counter masquerade]
+family ip table nat chain prerouting rulespec [iifname eth0 counter jump KUBEVIRT_PREINBOUND]
+family ip table nat chain postrouting rulespec [oifname k6t-eth0 counter jump KUBEVIRT_POSTINBOUND]
+family ip table nat chain KUBEVIRT_AMBIENT_POSTROUTING rulespec [oifname k6t-eth0 ct direction original meta mark & 0xfff == 0x539 counter ct mark set 0x539]
+family ip table nat chain KUBEVIRT_AMBIENT_PREROUTING rulespec [iifname k6t-eth0 ct mark & 0xfff == 0x539 counter meta mark set 0x111]
+family ip table nat chain KUBEVIRT_PREINBOUND rulespec [tcp dport { 15008 } counter return]
+family ip table nat chain KUBEVIRT_PREINBOUND rulespec [counter dnat to 10.0.2.2]
+family ip table nat chain KUBEVIRT_POSTINBOUND rulespec [ip saddr { 127.0.0.1 } counter snat to 10.0.2.1]
+family ip table nat chain output rulespec [ip daddr { 127.0.0.1, 10.222.222.1 } counter dnat to 10.0.2.2]
+`
+			Expect(nftStub.String()).To(Equal(expectedConfig), fmt.Sprintf("actual:\n%s\n\nexpected:\n%s", nftStub.String(), expectedConfig))
+		})
+	})
 })
 
 type nftableStub struct {

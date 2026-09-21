@@ -25,11 +25,25 @@ import (
 	v1 "kubevirt.io/api/core/v1"
 )
 
+// ProxyInjectionEnabled reports whether the VMI requested an Istio sidecar
+// via InjectSidecarAnnotation. A VMI labelled for the ambient mesh never gets
+// a sidecar (ambient has no in-pod proxy), so ambient takes precedence.
 func ProxyInjectionEnabled(vmi *v1.VirtualMachineInstance) bool {
+	if AmbientMeshEnabled(vmi) {
+		return false
+	}
 	if val, ok := vmi.GetAnnotations()[InjectSidecarAnnotation]; ok {
 		return strings.EqualFold(val, "true")
 	}
 	return false
+}
+
+// AmbientMeshEnabled reports whether the VMI is labelled for the Istio ambient
+// mesh (DataplaneModeLabel=DataplaneModeAmbient). The match is exact, like
+// istio-cni's label selector: a value istio would not enroll must not select
+// the ambient NAT layout either.
+func AmbientMeshEnabled(vmi *v1.VirtualMachineInstance) bool {
+	return vmi.GetLabels()[DataplaneModeLabel] == DataplaneModeAmbient
 }
 
 func GetLoopbackAddress() string {

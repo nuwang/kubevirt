@@ -136,6 +136,7 @@ func (c *NetConf) Teardown(vmi *v1.VirtualMachineInstance) error {
 func newMasqueradeAdapter(vmi *v1.VirtualMachineInstance, portRangesSpecGateEnabled bool) masquerade.MasqPod {
 	return masquerade.New(
 		masquerade.WithIstio(istio.ProxyInjectionEnabled(vmi)),
+		masquerade.WithAmbient(istio.AmbientMeshEnabled(vmi)),
 		masquerade.WithPortRangesSpecGateEnabled(portRangesSpecGateEnabled),
 	)
 }
